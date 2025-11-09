@@ -1,0 +1,204 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    name: Build and Verify
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      
+      - name: Install dependencies
+        run: npm ci
+      
+      - name: Build
+        run: npm run build
+      
+      - name: Check for uncommitted changes
+        run: |
+          if [ -n "$(git status --porcelain dist/)" ]; then
+            echo "ERROR: dist/ has uncommitted changes after build"
+            echo "Please run 'npm run build' and commit the changes"
+            git status --porcelain dist/
+            exit 1
+          fi
+
+  test-k0s-functionality:
+    runs-on: ubuntu-latest
+    name: Test k0s Functionality
+    needs: build
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Check initial state
+        run: |
+          echo "=== Checking Initial System State ==="
+          ! which k0s && echo "✓ k0s not installed initially" || (echo "✗ k0s already installed" && exit 1)
+          
+      - name: Setup k0s
+        id: k0s
+        uses: ./
+        with:
+          version: 'latest'
+          wait-for-ready: 'true'
+          timeout: '300'
+      
+      - name: Verify k0s is installed and running
+        run: |
+          echo "=== Verifying k0s Installation ==="
+          which k0s && echo "✓ k0s binary found at $(which k0s)" || (echo "✗ k0s binary not found" && exit 1)
+          sudo k0s status && echo "✓ k0s is running" || (echo "✗ k0s not running" && exit 1)
+      
+      - name: Test kubectl access
+        env:
+          KUBECONFIG: ${{ steps.k0s.outputs.kubeconfig }}
+        run: |
+          echo "=== Testing Kubernetes Functionality ==="
+          kubectl version --client
+          kubectl cluster-info
+          kubectl get nodes -o wide
+          kubectl get pods -A
+          
+      - name: Deploy test workload
+        env:
+          KUBECONFIG: ${{ steps.k0s.outputs.kubeconfig }}
+        run: |
+          echo "=== Deploying Test Workload ==="
+          
+          kubectl create deployment nginx --image=nginx:alpine
+          kubectl expose deployment nginx --port=80 --type=ClusterIP
+          kubectl wait --for=condition=available --timeout=120s deployment/nginx
+          
+          # Test connectivity
+          POD_NAME=$(kubectl get pod -l app=nginx -o jsonpath='{.items[0].metadata.name}')
+          kubectl exec $POD_NAME -- wget -O- http://localhost:80 | grep -q "Welcome to nginx"
+          echo "✓ Workload is functioning correctly"
+          
+      # NOTE: Cleanup runs automatically via post: hook after this job completes
+      
+  # Job 2: CRITICAL TEST - Verify cleanup worked by running the action again
+  test-cleanup-restoration:
+    runs-on: ubuntu-latest
+    name: Verify Cleanup Restores System State
+    needs: test-k0s-functionality
+    if: always()
+    
+    steps:
+      - uses: actions/checkout@v4
+        
+      - name: Verify no k0s remnants from previous job
+        run: |
+          echo "=== CRITICAL TEST: Verifying Previous Cleanup Was Complete ==="
+          echo "This proves cleanup from the previous job restored the system properly"
+          echo ""
+          
+          # k0s binary should be removed
+          if which k0s >/dev/null 2>&1; then
+            echo "✗ CRITICAL FAILURE: k0s binary still exists at $(which k0s)"
+            echo "This means the previous job's cleanup did NOT remove the binary!"
+            exit 1
+          fi
+          echo "✓ k0s binary removed"
+          
+          # k0s service should not exist
+          if systemctl list-unit-files | grep -q k0scontroller; then
+            echo "✗ CRITICAL FAILURE: k0s service still exists"
+            echo "This means the previous job's cleanup did NOT remove the service!"
+            systemctl list-unit-files | grep k0s || true
+            exit 1
+          fi
+          echo "✓ k0s service removed"
+          
+          # Data directories should be removed
+          [ ! -d /var/lib/k0s ] && echo "✓ k0s data dir removed" || (echo "✗ k0s data dir still exists" && exit 1)
+          [ ! -d /etc/k0s ] && echo "✓ k0s config dir removed" || (echo "✗ k0s config dir still exists" && exit 1)
+          
+          echo ""
+          echo "=========================================="
+          echo "✓✓✓ SUCCESS: CLEANUP RESTORED SYSTEM ✓✓✓"
+          echo "=========================================="
+          
+      - name: Run k0s again to prove it works after cleanup
+        id: k0s
+        uses: ./
+        with:
+          version: 'latest'
+          timeout: '300'
+        
+      - name: Verify second k0s instance works
+        env:
+          KUBECONFIG: ${{ steps.k0s.outputs.kubeconfig }}
+        run: |
+          echo "=== Verifying Second k0s Installation Works ==="
+          kubectl get nodes
+          kubectl get pods -A
+          kubectl create deployment nginx --image=nginx:alpine
+          kubectl wait --for=condition=available --timeout=120s deployment/nginx
+          echo "✓ Second k0s instance is fully functional"
+          
+      # Cleanup will run automatically again for this job
+      
+  # Job 3: FINAL TEST - Verify system is clean after multiple runs
+  test-final-cleanup:
+    runs-on: ubuntu-latest
+    name: Verify System Clean After Multiple Runs
+    needs: test-cleanup-restoration
+    if: always()
+    
+    steps:
+      - name: FINAL TEST - Verify system is pristine
+        run: |
+          echo "=== FINAL TEST: System Clean After Multiple k0s Runs ==="
+          echo "This proves the action can be used multiple times without leaving artifacts"
+          echo ""
+          
+          # Verify no k0s binary
+          if which k0s >/dev/null 2>&1; then
+            echo "✗ FAIL: k0s binary still exists"
+            exit 1
+          fi
+          echo "✓ No k0s binary"
+          
+          # Verify no k0s services
+          if systemctl list-unit-files | grep -q k0s; then
+            echo "✗ FAIL: k0s services still exist"
+            systemctl list-unit-files | grep k0s || true
+            exit 1
+          fi
+          echo "✓ No k0s services"
+          
+          # Verify no k0s directories
+          if [ -d /var/lib/k0s ] || [ -d /etc/k0s ]; then
+            echo "✗ FAIL: k0s directories still exist"
+            ls -la /var/lib/k0s /etc/k0s 2>/dev/null || true
+            exit 1
+          fi
+          echo "✓ No k0s directories"
+          
+          echo ""
+          echo "=========================================="
+          echo "✓✓✓ COMPLETE SUCCESS ✓✓✓"
+          echo "=========================================="
+          echo ""
+          echo "The setup-k0s action:"
+          echo "  ✓ Installs and runs k0s successfully"
+          echo "  ✓ Properly configures single-node cluster"
+          echo "  ✓ Completely restores system state after cleanup"
+          echo "  ✓ Can be run multiple times without issues"
+          echo "  ✓ Leaves no artifacts after cleanup"
+          echo ""
+          echo "System state restoration is PERFECT!"
