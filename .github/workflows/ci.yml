@@ -37,7 +37,7 @@ jobs:
           fi
 
   test-k0s-functionality:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     name: Test k0s Functionality
     needs: build
     
@@ -92,7 +92,7 @@ jobs:
       
   # Job 2: CRITICAL TEST - Verify cleanup worked by running the action again
   test-cleanup-restoration:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     name: Verify Cleanup Restores System State
     needs: test-k0s-functionality
     if: always()
@@ -154,7 +154,7 @@ jobs:
       
   # Job 3: FINAL TEST - Verify system is clean after multiple runs
   test-final-cleanup:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     name: Verify System Clean After Multiple Runs
     needs: test-cleanup-restoration
     if: always()
