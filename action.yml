@@ -1,0 +1,30 @@
+name: 'Setup k0s'
+description: 'Install and configure k0s - Zero Friction Kubernetes'
+author: 'fenio'
+
+branding:
+  icon: 'box'
+  color: 'blue'
+
+inputs:
+  version:
+    description: 'k0s version to install (e.g., "v1.30.0+k0s.0") or "latest"'
+    required: false
+    default: 'latest'
+  wait-for-ready:
+    description: 'Wait for cluster to be ready before completing'
+    required: false
+    default: 'true'
+  timeout:
+    description: 'Timeout in seconds to wait for cluster readiness'
+    required: false
+    default: '300'
+
+outputs:
+  kubeconfig:
+    description: 'Path to the kubeconfig file'
+
+runs:
+  using: 'node24'
+  main: 'dist/index.js'
+  post: 'dist/index.js'
